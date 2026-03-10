@@ -249,6 +249,8 @@ pub struct Terminal {
     pub active_hyperlink_id: Option<String>,
     bold_font_weight: Weight,
     buffer: Arc<Buffer>,
+    /// PID of the child shell process, used to read CWD from procfs.
+    child_pid: u32,
     is_focused: bool,
     colors: Colors,
     default_attrs: Attrs<'static>,
@@ -329,6 +331,7 @@ impl Terminal {
 
         let window_id = 0;
         let pty = tty::new(&options, size.into(), window_id)?;
+        let child_pid = pty.child().id();
 
         let pty_event_loop =
             EventLoop::new(term.clone(), event_proxy, pty, options.drain_on_exit, false)?;
@@ -342,6 +345,7 @@ impl Terminal {
             regex_matches: Vec::new(),
             bold_font_weight: Weight(bold_font_weight),
             buffer: Arc::new(buffer),
+            child_pid,
             colors,
             context_menu: None,
             default_attrs,
@@ -360,6 +364,14 @@ impl Terminal {
             zoom_adj: Default::default(),
             is_focused: true,
         })
+    }
+
+    /// Returns the current working directory of the child shell process.
+    ///
+    /// Reads from `/proc/{pid}/cwd`. Returns None if the process has exited
+    /// or the symlink cannot be read.
+    pub fn current_working_directory(&self) -> Option<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/{}/cwd", self.child_pid)).ok()
     }
 
     pub fn buffer_weak(&self) -> Weak<Buffer> {

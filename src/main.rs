@@ -1504,10 +1504,20 @@ impl App {
         self.config.default_profile
     }
 
+    /// Returns the current working directory of the active terminal in the given pane.
+    fn focused_terminal_cwd(&self, pane: pane_grid::Pane) -> Option<std::path::PathBuf> {
+        let tab_model = self.pane_model.panes.get(pane)?;
+        let entity = tab_model.active();
+        let terminal = tab_model.data::<Mutex<Terminal>>(entity)?;
+        let terminal = terminal.lock().unwrap();
+        terminal.current_working_directory()
+    }
+
     fn create_and_focus_new_terminal(
         &mut self,
         pane: pane_grid::Pane,
         profile_id_opt: Option<ProfileId>,
+        inherited_cwd: Option<std::path::PathBuf>,
     ) -> Task<Message> {
         self.pane_model.set_focus(pane);
         match &self.term_event_tx_opt {
@@ -1545,12 +1555,13 @@ impl App {
                                         }
                                         None
                                     }),
-                                    working_directory: startup_options.working_directory.or_else(
-                                        || {
+                                    working_directory: startup_options
+                                        .working_directory
+                                        .or_else(|| {
                                             (!profile.working_directory.is_empty())
                                                 .then(|| profile.working_directory.clone().into())
-                                        },
-                                    ),
+                                        })
+                                        .or(inherited_cwd),
                                     drain_on_exit: startup_options.drain_on_exit
                                         || profile.drain_on_exit,
                                     ..startup_options
@@ -1562,7 +1573,12 @@ impl App {
                                 };
                                 (options, tab_title_override)
                             } else {
-                                (self.startup_options.take().unwrap_or_default(), None)
+                                let mut options =
+                                    self.startup_options.take().unwrap_or_default();
+                                if options.working_directory.is_none() {
+                                    options.working_directory = inherited_cwd;
+                                }
+                                (options, None)
                             };
 
                             let entity = tab_model
@@ -2532,6 +2548,7 @@ impl Application for App {
                 return self.update_title(Some(pane));
             }
             Message::PaneSplit(axis) => {
+                let cwd = self.focused_terminal_cwd(self.pane_model.focused());
                 let result = self.pane_model.panes.split(
                     axis,
                     self.pane_model.focused(),
@@ -2540,7 +2557,7 @@ impl Application for App {
                 if let Some((pane, _)) = result {
                     self.terminal_ids.insert(pane, widget::Id::unique());
                     let command =
-                        self.create_and_focus_new_terminal(pane, self.get_default_profile());
+                        self.create_and_focus_new_terminal(pane, self.get_default_profile(), cwd);
                     self.pane_model.panes_created += 1;
                     return command;
                 }
@@ -2652,8 +2669,10 @@ impl Application for App {
                 return self.save_profiles();
             }
             Message::ProfileOpen(profile_id) => {
+                let focused = self.pane_model.focused();
+                let cwd = self.focused_terminal_cwd(focused);
                 return self
-                    .create_and_focus_new_terminal(self.pane_model.focused(), Some(profile_id));
+                    .create_and_focus_new_terminal(focused, Some(profile_id), cwd);
             }
             Message::ProfileRemove(profile_id) => {
                 // Reset matching terminals to default profile
@@ -2929,13 +2948,18 @@ impl Application for App {
                 return cosmic::Task::batch(tasks);
             }
             Message::TabNew => {
+                let focused = self.pane_model.focused();
+                let cwd = self.focused_terminal_cwd(focused);
                 return self.create_and_focus_new_terminal(
-                    self.pane_model.focused(),
+                    focused,
                     self.get_default_profile(),
+                    cwd,
                 );
             }
             Message::TabNewNoProfile => {
-                return self.create_and_focus_new_terminal(self.pane_model.focused(), None);
+                let focused = self.pane_model.focused();
+                let cwd = self.focused_terminal_cwd(focused);
+                return self.create_and_focus_new_terminal(focused, None, cwd);
             }
             Message::TabNext => {
                 if let Some(tab_model) = self.pane_model.active() {
