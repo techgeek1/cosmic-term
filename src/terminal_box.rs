@@ -924,14 +924,20 @@ where
                         }
                     }
                     Named::ArrowUp => {
-                        if is_app_cursor {
+                        if modifiers.shift() {
+                            terminal.scroll(TerminalScroll::Delta(3));
+                            None
+                        } else if is_app_cursor {
                             ss3("A", mod_no)
                         } else {
                             csi2("A", mod_no)
                         }
                     }
                     Named::ArrowDown => {
-                        if is_app_cursor {
+                        if modifiers.shift() {
+                            terminal.scroll(TerminalScroll::Delta(-3));
+                            None
+                        } else if is_app_cursor {
                             ss3("B", mod_no)
                         } else {
                             csi2("B", mod_no)
