@@ -2579,8 +2579,11 @@ impl Application for App {
                 );
                 if let Some((pane, _)) = result {
                     self.terminal_ids.insert(pane, widget::Id::unique());
-                    let command =
-                        self.create_and_focus_new_terminal(pane, self.get_default_profile(), true);
+                    let command = self.create_and_focus_new_terminal(
+                        pane,
+                        self.get_default_profile(),
+                        self.config.tab_new_inherit_working_directory,
+                    );
                     self.pane_model.panes_created += 1;
                     return command;
                 }
@@ -2695,7 +2698,7 @@ impl Application for App {
                 return self.create_and_focus_new_terminal(
                     self.pane_model.focused(),
                     Some(profile_id),
-                    false,
+                    self.config.tab_new_inherit_working_directory,
                 );
             }
             Message::ProfileRemove(profile_id) => {
