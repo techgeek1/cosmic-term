@@ -28,7 +28,8 @@ use indexmap::IndexSet;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    io, mem,
+    fs, io, mem,
+    path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU32, Ordering},
@@ -249,8 +250,6 @@ pub struct Terminal {
     pub active_hyperlink_id: Option<String>,
     bold_font_weight: Weight,
     buffer: Arc<Buffer>,
-    /// PID of the child shell process, used to read CWD from procfs.
-    child_pid: u32,
     is_focused: bool,
     colors: Colors,
     default_attrs: Attrs<'static>,
@@ -259,6 +258,7 @@ pub struct Terminal {
     notifier: Notifier,
     search_regex_opt: Option<RegexSearch>,
     search_value: String,
+    shell_pid: Option<u32>,
     size: Size,
     use_bright_bold: bool,
     zoom_adj: i8,
@@ -331,7 +331,10 @@ impl Terminal {
 
         let window_id = 0;
         let pty = tty::new(&options, size.into(), window_id)?;
-        let child_pid = pty.child().id();
+        #[cfg(not(windows))]
+        let shell_pid = Some(pty.child().id());
+        #[cfg(windows)]
+        let shell_pid = pty.child_watcher().pid().map(|pid| pid.get());
 
         let pty_event_loop =
             EventLoop::new(term.clone(), event_proxy, pty, options.drain_on_exit, false)?;
@@ -345,7 +348,6 @@ impl Terminal {
             regex_matches: Vec::new(),
             bold_font_weight: Weight(bold_font_weight),
             buffer: Arc::new(buffer),
-            child_pid,
             colors,
             context_menu: None,
             default_attrs,
@@ -357,6 +359,7 @@ impl Terminal {
             profile_id_opt,
             search_regex_opt: None,
             search_value: String::new(),
+            shell_pid,
             size,
             tab_title_override,
             term,
@@ -364,14 +367,6 @@ impl Terminal {
             zoom_adj: Default::default(),
             is_focused: true,
         })
-    }
-
-    /// Returns the current working directory of the child shell process.
-    ///
-    /// Reads from `/proc/{pid}/cwd`. Returns None if the process has exited
-    /// or the symlink cannot be read.
-    pub fn current_working_directory(&self) -> Option<std::path::PathBuf> {
-        std::fs::read_link(format!("/proc/{}/cwd", self.child_pid)).ok()
     }
 
     pub fn buffer_weak(&self) -> Weak<Buffer> {
@@ -418,6 +413,19 @@ impl Terminal {
 
     pub fn input_no_scroll<I: Into<Cow<'static, [u8]>>>(&self, input: I) {
         self.notifier.notify(input);
+    }
+
+    pub fn working_directory(&self) -> Option<PathBuf> {
+        #[cfg(target_os = "linux")]
+        {
+            let shell_pid = self.shell_pid?;
+            fs::read_link(format!("/proc/{shell_pid}/cwd")).ok()
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
     }
 
     pub fn input_scroll<I: Into<Cow<'static, [u8]>>>(&self, input: I) {
