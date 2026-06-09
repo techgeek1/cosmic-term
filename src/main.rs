@@ -4,6 +4,7 @@
 use alacritty_terminal::{event::Event as TermEvent, term, term::color::Colors as TermColors, tty};
 use cosmic::iced::clipboard::dnd::DndAction;
 use cosmic::iced::core::keyboard::key::Named;
+use cosmic::iced::keyboard::key::Physical;
 use cosmic::widget::menu::action::MenuAction;
 use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic::widget::pane_grid::Pane;
@@ -185,7 +186,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Terminal config setup
-    let term_config = term::Config::default();
+    let term_config = term::Config {
+        scrolling_history: 100_000,
+        ..term::Config::default()
+    };
     // Set up environmental variables for terminal
     tty::setup_env();
     // Override TERM for better compatibility
@@ -383,7 +387,7 @@ pub enum Message {
     FindSearchValueChanged(String),
     MiddleClick(pane_grid::Pane, Option<segmented_button::Entity>),
     FocusFollowMouse(bool),
-    Key(Modifiers, Key),
+    Key(Modifiers, Physical, Key),
     LaunchUrl(String),
     LaunchUrlByMenu,
     Modifiers(Modifiers),
@@ -438,7 +442,7 @@ pub enum Message {
     TabNext,
     TabPrev,
     TermEvent(pane_grid::Pane, segmented_button::Entity, TermEvent),
-    TermEventTx(mpsc::Sender<(pane_grid::Pane, segmented_button::Entity, TermEvent)>),
+    TermEventTx(mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, TermEvent)>),
     ToggleFullscreen,
     ToggleContextPage(ContextPage),
     UpdateDefaultProfile((bool, ProfileId)),
@@ -502,7 +506,8 @@ pub struct App {
     find: bool,
     find_search_id: widget::Id,
     find_search_value: String,
-    term_event_tx_opt: Option<mpsc::Sender<(pane_grid::Pane, segmented_button::Entity, TermEvent)>>,
+    term_event_tx_opt:
+        Option<mpsc::UnboundedSender<(pane_grid::Pane, segmented_button::Entity, TermEvent)>>,
     startup_options: Option<tty::Options>,
     term_config: term::Config,
     color_scheme_errors: Vec<String>,
@@ -989,6 +994,7 @@ impl App {
                             //TODO: re-export in libcosmic
                             iced::widget::text::Style {
                                 color: Some(cosmic.destructive_text_color().into()),
+                                ..Default::default()
                             }
                         }))
                         .into(),
@@ -2418,7 +2424,7 @@ impl Application for App {
             Message::FocusFollowMouse(focus_follow_mouse) => {
                 config_set!(focus_follow_mouse, focus_follow_mouse);
             }
-            Message::Key(modifiers, key) => {
+            Message::Key(modifiers, physical, key) => {
                 // Hard-coded keys
                 match key {
                     Key::Named(Named::Copy) => {
@@ -2458,7 +2464,7 @@ impl Application for App {
 
                 // Handle configurable keys
                 for (key_bind, action) in &self.key_binds {
-                    if key_bind.matches(modifiers, &key) {
+                    if key_bind.matches(modifiers, &key, Some(&physical)) {
                         return self.update(action.message(None));
                     }
                 }
@@ -3227,12 +3233,21 @@ impl Application for App {
                 }
             }
             Message::WindowNew => match env::current_exe() {
-                Ok(exe) => match process::Command::new(&exe).spawn() {
-                    Ok(_child) => {}
-                    Err(err) => {
-                        log::error!("failed to execute {:?}: {}", exe, err);
+                Ok(exe) => {
+                    let mut command = process::Command::new(&exe);
+                    if self.config.tab_new_inherit_working_directory
+                        && let Some(dir) = self.active_terminal_working_directory()
+                    {
+                        command.arg("--working-directory");
+                        command.arg(dir);
                     }
-                },
+                    match command.spawn() {
+                        Ok(_child) => {}
+                        Err(err) => {
+                            log::error!("failed to execute {:?}: {}", exe, err);
+                        }
+                    }
+                }
                 Err(err) => {
                     log::error!("failed to get current executable path: {}", err);
                 }
@@ -3610,9 +3625,12 @@ impl Application for App {
 
         Subscription::batch([
             event::listen_with(|event, _status, _window_id| match event {
-                Event::Keyboard(KeyEvent::KeyPressed { key, modifiers, .. }) => {
-                    Some(Message::Key(modifiers, key))
-                }
+                Event::Keyboard(KeyEvent::KeyPressed {
+                    key,
+                    physical_key,
+                    modifiers,
+                    ..
+                }) => Some(Message::Key(modifiers, physical_key, key)),
                 Event::Keyboard(KeyEvent::ModifiersChanged(modifiers)) => {
                     Some(Message::Modifiers(modifiers))
                 }
@@ -3625,11 +3643,7 @@ impl Application for App {
                 stream::channel(
                     100,
                     |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                        // Bounded: when the GUI can't drain fast enough, alacritty's PTY reader
-                        // blocks on send → kernel pipe fills → producing program is throttled by
-                        // the OS. Capacity 1024 caps the queue depth; per-event memory depends on
-                        // payload (Wakeup is ~100 B; Title/PtyWrite carry owned Strings).
-                        let (event_tx, mut event_rx) = mpsc::channel(1024);
+                        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
                         output.send(Message::TermEventTx(event_tx)).await.unwrap();
 
                         while let Some((pane, entity, event)) = event_rx.recv().await {

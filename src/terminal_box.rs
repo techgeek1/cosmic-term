@@ -45,10 +45,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    Action, Terminal, TerminalScroll, menu::MenuState, mouse_reporter::MouseReporter,
-    terminal::Metadata,
-};
+use crate::{Action, Terminal, TerminalScroll, menu::MenuState, terminal::Metadata};
 
 const AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -936,13 +933,14 @@ where
             },
             Event::Keyboard(KeyEvent::KeyPressed {
                 key: Key::Named(named),
+                physical_key,
                 modified_key: Key::Named(modified_named),
                 modifiers,
                 text,
                 ..
             }) if state.is_focused && named == modified_named => {
                 for key_bind in self.key_binds.keys() {
-                    if key_bind.matches(*modifiers, &Key::Named(*named)) {
+                    if key_bind.matches(*modifiers, &Key::Named(*named), Some(physical_key)) {
                         shell.capture_event();
                         return;
                     }
@@ -1112,6 +1110,7 @@ where
                 text,
                 modifiers,
                 key,
+                physical_key,
                 ..
             }) if state.is_focused && *key == Key::Character(SmolStr::new(" ")) => {
                 //Special handle Enter, Escape, Backspace and Tab as described in
@@ -1137,10 +1136,12 @@ where
                 text,
                 modifiers,
                 key,
+                physical_key,
+                modified_key,
                 ..
             }) if state.is_focused => {
                 for key_bind in self.key_binds.keys() {
-                    if key_bind.matches(*modifiers, key) {
+                    if key_bind.matches(*modifiers, key, Some(physical_key)) {
                         shell.capture_event();
 
                         return;
@@ -1183,11 +1184,10 @@ where
                         }
                     }
                     (false, true, _, true) => {
-                        //This is normally Ctrl+Minus, but since that
-                        //is taken by zoom, we send that code for
-                        //Ctrl+Underline instead, like xterm and
-                        //gnome-terminal
-                        if *key == Key::Character("_".into()) {
+                        // Ctrl+Shift+<key>: send 0x1F (C-_) on '_', matching xterm/gnome-terminal.
+                        // Use `modified_key` so this works regardless of which physical key
+                        // produces '_' on the user's layout.
+                        if *modified_key == Key::Character("_".into()) {
                             terminal.input_scroll(b"\x1F".as_slice());
                             shell.capture_event();
                         }
@@ -1558,12 +1558,7 @@ where
                         let row = y / terminal.size().cell_height;
                         terminal.scroll_mouse(*delta, &state.modifiers, col as u32, row as u32);
                     } else if terminal.term.lock().mode().contains(TermMode::ALT_SCREEN) {
-                        MouseReporter::report_mouse_wheel_as_arrows(
-                            &terminal,
-                            terminal.size().cell_width,
-                            terminal.size().cell_height,
-                            *delta,
-                        );
+                        terminal.scroll_as_arrows(*delta);
                         shell.capture_event();
                     } else {
                         match delta {
