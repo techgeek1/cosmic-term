@@ -429,7 +429,6 @@ where
             // Pane too small for content, but still fill background
             let terminal = self.terminal.lock().unwrap();
             let meta = &terminal.metadata_set[terminal.default_attrs().metadata];
-            let background_color = shade(meta.bg, state.is_focused && !self.disabled);
             renderer.fill_quad(
                 Quad {
                     bounds: layout.bounds(),
@@ -446,12 +445,12 @@ where
                     ..Default::default()
                 },
                 Color::from_rgba(
-                    f32::from(background_color.r()) / 255.0,
-                    f32::from(background_color.g()) / 255.0,
-                    f32::from(background_color.b()) / 255.0,
+                    f32::from(meta.bg.r()) / 255.0,
+                    f32::from(meta.bg.g()) / 255.0,
+                    f32::from(meta.bg.b()) / 255.0,
                     match self.opacity {
                         Some(opacity) => opacity,
-                        None => f32::from(background_color.a()) / 255.0,
+                        None => f32::from(meta.bg.a()) / 255.0,
                     },
                 ),
             );
@@ -472,8 +471,6 @@ where
         // Render default background
         {
             let meta = &terminal.metadata_set[terminal.default_attrs().metadata];
-            let background_color = shade(meta.bg, state.is_focused && !self.disabled);
-
             renderer.fill_quad(
                 Quad {
                     bounds: layout.bounds(),
@@ -490,12 +487,12 @@ where
                     ..Default::default()
                 },
                 Color::from_rgba(
-                    f32::from(background_color.r()) / 255.0,
-                    f32::from(background_color.g()) / 255.0,
-                    f32::from(background_color.b()) / 255.0,
+                    f32::from(meta.bg.r()) / 255.0,
+                    f32::from(meta.bg.g()) / 255.0,
+                    f32::from(meta.bg.b()) / 255.0,
                     match self.opacity {
                         Some(opacity) => opacity,
-                        None => f32::from(background_color.a()) / 255.0,
+                        None => f32::from(meta.bg.a()) / 255.0,
                     },
                 ),
             );
@@ -574,10 +571,9 @@ where
 
                         let metadata = &self.metadata_set[self.metadata];
                         if metadata.bg != self.metadata_set[self.default_metadata].bg {
-                            let color = shade(metadata.bg, is_focused);
                             renderer.fill_quad(
                                 mk_quad!(mk_pos_offset!(0.0, self.line_height), self.line_height),
-                                cosmic_text_to_iced_color(color),
+                                cosmic_text_to_iced_color(metadata.bg),
                             );
                         }
 
@@ -756,7 +752,7 @@ where
             let scrollbar_color: Color = if pressed {
                 // pressed_state_color, 0.5
                 cosmic_theme
-                    .background
+                    .background(theme.transparent)
                     .component
                     .pressed
                     .without_alpha()
@@ -766,7 +762,7 @@ where
             } else if hover {
                 // hover_state_color, 0.2
                 cosmic_theme
-                    .background
+                    .background(theme.transparent)
                     .component
                     .hover
                     .without_alpha()
@@ -1391,8 +1387,6 @@ where
                         }
                         shell.capture_event();
                     }
-                } else {
-                    state.is_focused = false;
                 }
             }
             Event::Mouse(MouseEvent::ButtonReleased(Button::Left)) => {
@@ -1563,16 +1557,22 @@ where
                     } else {
                         match delta {
                             ScrollDelta::Lines { x: _, y } => {
-                                //TODO: this adjustment is just a guess!
+                                // High-resolution wheels deliver a notch as many
+                                // fractional deltas; accumulate them so nothing
+                                // below one whole line is lost (see
+                                // accumulate_wheel_lines).
                                 state.scroll_pixels = 0.0;
-                                let lines = (-y * 6.0) as i32;
+                                let (lines, remainder) =
+                                    accumulate_wheel_lines(*y, state.scroll_lines);
+                                state.scroll_lines = remainder;
                                 if lines != 0 {
-                                    terminal.scroll(TerminalScroll::Delta(-lines));
+                                    terminal.scroll(TerminalScroll::Delta(lines));
                                 }
                                 shell.capture_event();
                             }
                             ScrollDelta::Pixels { x: _, y } => {
                                 //TODO: this adjustment is just a guess!
+                                state.scroll_lines = 0.0;
                                 state.scroll_pixels -= y * 6.0;
                                 let mut lines = 0;
                                 let metrics = terminal.with_buffer(|buffer| buffer.metrics());
@@ -1738,18 +1738,24 @@ fn update_active_regex_match(
     }
 }
 
-fn shade(color: cosmic_text::Color, is_focused: bool) -> cosmic_text::Color {
-    if is_focused {
-        color
-    } else {
-        let shade = 0.92;
-        cosmic_text::Color::rgba(
-            (f32::from(color.r()) * shade) as u8,
-            (f32::from(color.g()) * shade) as u8,
-            (f32::from(color.b()) * shade) as u8,
-            color.a(),
-        )
-    }
+/// Whole lines scrolled per unit of wheel `Lines` delta.
+//TODO: this adjustment is just a guess!
+const SCROLL_LINE_MULTIPLIER: f32 = 6.0;
+
+/// Convert a wheel `Lines` delta into whole lines to scroll, accumulating the
+/// fractional remainder across events.
+///
+/// High-resolution wheels deliver a single physical notch as many fractional
+/// deltas (e.g. `y = 0.125`). Scaling by [`SCROLL_LINE_MULTIPLIER`] and
+/// truncating per event discards anything below one whole line, so most of
+/// those events would scroll nothing. Carrying the remainder forward means the
+/// fractions add up and a full notch scrolls the intended amount.
+///
+/// Returns `(whole_lines, new_accumulator)`.
+fn accumulate_wheel_lines(y: f32, accumulator: f32) -> (i32, f32) {
+    let total = accumulator + y * SCROLL_LINE_MULTIPLIER;
+    let lines = total.trunc() as i32;
+    (lines, total - lines as f32)
 }
 
 impl<'a, Message> From<TerminalBox<'a, Message>> for Element<'a, Message, cosmic::Theme, Renderer>
@@ -1939,6 +1945,7 @@ pub struct State {
     dragging: Option<Dragging>,
     is_focused: bool,
     scroll_pixels: f32,
+    scroll_lines: f32,
     scrollbar_rect: Cell<Rectangle<f32>>,
     autoscroll: DragAutoscroll,
     preedit: Option<input_method::Preedit>,
@@ -1953,6 +1960,7 @@ impl State {
             dragging: None,
             is_focused: false,
             scroll_pixels: 0.0,
+            scroll_lines: 0.0,
             scrollbar_rect: Cell::new(Rectangle::default()),
             autoscroll: DragAutoscroll::new(AUTOSCROLL_INTERVAL),
             preedit: None,
@@ -2032,7 +2040,38 @@ fn ss3(code: &str, modifiers: u8) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EdgeScrollDirection, edge_scroll_adjustment};
+    use super::{EdgeScrollDirection, accumulate_wheel_lines, edge_scroll_adjustment};
+
+    #[test]
+    fn wheel_lines_single_fractional_event_keeps_remainder() {
+        // A high-res wheel notch arrives as fractional deltas. A lone 0.125
+        // event is less than one whole line, but must not be discarded.
+        let (lines, remainder) = accumulate_wheel_lines(0.125, 0.0);
+        assert_eq!(lines, 0);
+        assert!((remainder - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn wheel_lines_accumulate_into_whole_lines() {
+        // Eight 0.125 deltas make up one physical notch and must scroll the
+        // full SCROLL_LINE_MULTIPLIER (6) lines, not be lost to truncation.
+        let mut accumulator = 0.0;
+        let mut total = 0;
+        for _ in 0..8 {
+            let (lines, remainder) = accumulate_wheel_lines(0.125, accumulator);
+            accumulator = remainder;
+            total += lines;
+        }
+        assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn wheel_lines_preserve_direction() {
+        let (down, _) = accumulate_wheel_lines(0.25, 0.0);
+        let (up, _) = accumulate_wheel_lines(-0.25, 0.0);
+        assert_eq!(down, 1);
+        assert_eq!(up, -1);
+    }
 
     const BUFFER_HEIGHT: f32 = 200.0;
     const CELL_HEIGHT: f32 = 20.0;

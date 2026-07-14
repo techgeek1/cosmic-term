@@ -678,7 +678,7 @@ impl App {
 
         // Update terminal window background color
         {
-            let color = Color::from(theme.cosmic().background.base);
+            let color = Color::from(theme.cosmic().background(theme.transparent).base);
             let bytes = color.into_rgba8();
             let data = u32::from(bytes[2])
                 | (u32::from(bytes[1]) << 8)
@@ -688,11 +688,12 @@ impl App {
         }
 
         // Set config of all tabs
+        let color_scheme_kind = self.config.color_scheme_kind(&theme);
         for (_pane, tab_model) in self.pane_model.panes.iter() {
             for entity in tab_model.iter() {
                 if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
                     let mut terminal = terminal.lock().unwrap();
-                    terminal.set_config(&self.config, &self.themes);
+                    terminal.set_config(&self.config, color_scheme_kind, &self.themes);
                 }
             }
         }
@@ -708,6 +709,7 @@ impl App {
         // skip writing config to fs when zoom in/ out
         // recalculate the pane due to the changes of zoom_adj value
         // but only for the active pane/tab
+        let color_scheme_kind = self.config.color_scheme_kind(self.core.system_theme());
         if let Some(tab_model) = self.pane_model.active() {
             for entity in tab_model.iter() {
                 if tab_model.is_active(entity)
@@ -724,7 +726,7 @@ impl App {
                         }
                         _ => {}
                     }
-                    terminal.set_config(&self.config, &self.themes);
+                    terminal.set_config(&self.config, color_scheme_kind, &self.themes);
                 }
             }
         }
@@ -1324,6 +1326,7 @@ impl App {
     }
 
     fn settings(&self) -> Element<'_, Message> {
+        let t = self.core().system_theme();
         let app_theme_selected = match self.config.app_theme {
             AppTheme::Dark => 1,
             AppTheme::Light => 2,
@@ -1407,13 +1410,13 @@ impl App {
                     }),
                 ),
             )
-            .add(
+            .add_maybe((!t.transparent).then(|| {
                 widget::settings::item::builder(fl!("opacity"))
                     .description(format!("{}%", self.config.opacity))
                     .control(widget::slider(0..=100, self.config.opacity, |opacity| {
                         Message::Opacity(opacity)
-                    })),
-            );
+                    }))
+            }));
 
         let mut font_section = widget::settings::section()
             .title(fl!("font"))
@@ -1552,10 +1555,11 @@ impl App {
         self.pane_model.set_focus(pane);
         match &self.term_event_tx_opt {
             Some(term_event_tx) => {
+                let color_scheme_kind = self.config.color_scheme_kind(self.core.system_theme());
                 let colors = self
                     .themes
-                    .get(&self.config.syntax_theme(profile_id_opt))
-                    .or_else(|| match self.config.color_scheme_kind() {
+                    .get(&self.config.syntax_theme(color_scheme_kind, profile_id_opt))
+                    .or_else(|| match color_scheme_kind {
                         ColorSchemeKind::Dark => self
                             .themes
                             .get(&(config::COSMIC_THEME_DARK.to_string(), ColorSchemeKind::Dark)),
@@ -1632,7 +1636,11 @@ impl App {
                                 tab_title_override,
                             ) {
                                 Ok(mut terminal) => {
-                                    terminal.set_config(&self.config, &self.themes);
+                                    terminal.set_config(
+                                        &self.config,
+                                        color_scheme_kind,
+                                        &self.themes,
+                                    );
                                     tab_model
                                         .data_set::<Mutex<Terminal>>(entity, Mutex::new(terminal));
                                 }
@@ -1671,7 +1679,7 @@ impl App {
                     None => {
                         log::error!(
                             "failed to find terminal theme {:?}",
-                            self.config.syntax_theme(profile_id_opt)
+                            self.config.syntax_theme(color_scheme_kind, profile_id_opt)
                         );
                         //TODO: fall back to known good theme
                     }
@@ -2574,7 +2582,8 @@ impl Application for App {
             }
             Message::PaneClicked(pane) => {
                 self.pane_model.set_focus(pane);
-                return self.update_title(Some(pane));
+                let title_task = self.update_title(Some(pane));
+                return Task::batch([self.update_focus(), title_task]);
             }
             Message::PaneSplit(axis) => {
                 let result = self.pane_model.panes.split(
@@ -2950,7 +2959,9 @@ impl Application for App {
                                 let pos_y = _position.y as i32;
 
                                 tasks.push(cosmic::task::message(Message::Surface(
-                                    cosmic::surface::action::app_popup(move |_app: &mut Self| {
+                                    cosmic::surface::action::app_popup(
+                                           |_| Default::default(),
+                                        move |_app: &mut Self| {
                                         use cosmic::cctk::wayland_protocols::xdg::shell::client::xdg_positioner::{Anchor, Gravity};
                                         use cosmic::iced::runtime::platform_specific::wayland::popup::{SctkPopupSettings, SctkPositioner};
 
@@ -3062,7 +3073,7 @@ impl Application for App {
                             && let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity)
                         {
                             let terminal = terminal.lock().unwrap();
-                            let rgb = terminal.colors()[index].unwrap_or_default();
+                            let rgb = terminal.effective_color(index);
                             let text = f(rgb);
                             terminal.input_no_scroll(text.into_bytes());
                         }
@@ -3421,7 +3432,9 @@ impl Application for App {
 
     /// Creates a view after each update.
     fn view(&self) -> Element<'_, Self::Message> {
-        let cosmic_theme::Spacing { space_xxs, .. } = self.core().system_theme().cosmic().spacing;
+        let t = self.core().system_theme();
+        let cosmic = t.cosmic();
+        let cosmic_theme::Spacing { space_xxs, .. } = cosmic.spacing;
 
         let pane_grid = PaneGrid::new(&self.pane_model.panes, |pane, tab_model, _is_maximized| {
             let mut tab_column = widget::column::with_capacity(1);
@@ -3441,10 +3454,10 @@ impl Application for App {
                     .class(style::Container::Custom(Box::new(|theme| {
                         let cosmic = theme.cosmic();
                         cosmic::iced::widget::container::Style {
-                            icon_color: Some(Color::from(cosmic.background.on)),
-                            text_color: Some(Color::from(cosmic.background.on)),
+                            icon_color: Some(Color::from(cosmic.background(theme.transparent).on)),
+                            text_color: Some(Color::from(cosmic.background(theme.transparent).on)),
                             background: Some(iced::Background::Color(
-                                cosmic.background.base.into(),
+                                cosmic.background(theme.transparent).base.into(),
                             )),
                             border: iced::Border::default(),
                             shadow: iced::Shadow::default(),
@@ -3471,7 +3484,11 @@ impl Application for App {
                     .on_open_hyperlink(Some(Box::new(Message::LaunchUrl)))
                     .on_window_focused(|| Message::WindowFocused)
                     .on_window_unfocused(|| Message::WindowUnfocused)
-                    .opacity(self.config.opacity_ratio())
+                    .opacity(if t.transparent {
+                        t.cosmic().alpha_map.blurred_alpha(t.cosmic().frosted)
+                    } else {
+                        self.config.opacity_ratio()
+                    })
                     .padding(space_xxs)
                     .sharp_corners(self.core.window.sharp_corners)
                     .show_headerbar(self.config.show_headerbar);

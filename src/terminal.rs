@@ -190,7 +190,7 @@ impl TerminalPaneGrid {
             let entity = tab_model.active();
             if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
                 let mut terminal = terminal.lock().unwrap();
-                terminal.is_focused = self.focus == *pane;
+                terminal.set_focused(self.focus == *pane);
                 terminal.update();
             }
         }
@@ -200,7 +200,7 @@ impl TerminalPaneGrid {
             let entity = tab_model.active();
             if let Some(terminal) = tab_model.data::<Mutex<Terminal>>(entity) {
                 let mut terminal = terminal.lock().unwrap();
-                terminal.is_focused = false;
+                terminal.set_focused(false);
                 terminal.update();
             }
         }
@@ -386,6 +386,19 @@ impl Terminal {
         &self.colors
     }
 
+    pub fn effective_color(&self, index: usize) -> Rgb {
+        if index == NamedColor::Background as usize {
+            self.colors[index].unwrap_or_else(|| {
+                // Allow using an unset background
+                let [r, g, b, _] =
+                    cosmic_text::Color(WINDOW_BG_COLOR.load(Ordering::SeqCst)).as_rgba();
+                Rgb { r, g, b }
+            })
+        } else {
+            self.colors[index].unwrap_or_default()
+        }
+    }
+
     pub fn default_attrs(&self) -> &Attrs<'static> {
         &self.default_attrs
     }
@@ -400,6 +413,22 @@ impl Terminal {
 
     pub fn set_zoom_adj(&mut self, value: i8) {
         self.zoom_adj = value;
+    }
+
+    fn set_focused(&mut self, is_focused: bool) {
+        let focus_changed = self.is_focused != is_focused;
+        self.is_focused = is_focused;
+
+        if focus_changed {
+            let report_focus = self.term.lock().mode().contains(TermMode::FOCUS_IN_OUT);
+            if report_focus {
+                const FOCUS_IN: &[u8] = b"\x1b[I";
+                const FOCUS_OUT: &[u8] = b"\x1b[O";
+
+                let input = if is_focused { FOCUS_IN } else { FOCUS_OUT };
+                self.input_no_scroll(input);
+            }
+        }
     }
 
     pub fn redraw(&self) -> bool {
@@ -613,6 +642,7 @@ impl Terminal {
     pub fn set_config(
         &mut self,
         config: &AppConfig,
+        color_scheme_kind: ColorSchemeKind,
         themes: &HashMap<(String, ColorSchemeKind), Colors>,
     ) {
         let mut update_cell_size = false;
@@ -655,7 +685,9 @@ impl Terminal {
             update_cell_size = true;
         }
 
-        if let Some(colors) = themes.get(&config.syntax_theme(self.profile_id_opt)) {
+        if let Some(colors) =
+            themes.get(&config.syntax_theme(color_scheme_kind, self.profile_id_opt))
+        {
             let mut changed = false;
             for i in 0..color::COUNT {
                 if self.colors[i] != colors[i] {
